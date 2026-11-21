@@ -1,0 +1,409 @@
+diff --git a/scripts/chinese/README.md b/scripts/chinese/README.md
+index cbf1eff..c7a7bbd 100644
+--- a/scripts/chinese/README.md
++++ b/scripts/chinese/README.md
+@@ -32,12 +32,25 @@
+ |---|---|---|
+ | `CN_PW14/CN_PH14` | 512/512 | 14i 图集尺寸（小字） |
+ | `CN_SZ14 / CN_B14 / CN_PAD14` | 12 / 11 / 0 | 小字字号、基线、格间留白 |
++| `CN_FONT14` | 跟随 `CN_FONT` | 仅覆盖小字字体文件 |
++| `CN_LATIN_SPACING14` | 0 | 小字英文字母额外前进距离（像素） |
++| `CN_SHIFT_Y14 / CN_SHIFT_Y21` | 0 / 0 | 小字、大字的绘制纵移（字库像素），负值上移 |
+ | `CN_PW21/CN_PH21` | 1024/1024 | 21i 图集尺寸（大字） |
+ | `CN_SZ21 / CN_B21 / CN_PAD21` | 18 / 13 / 0 | 大字字号、基线、留白 |
+ | `CN_MAXCHARS` | 0（全部） | 只取最常见的 N 个字，调试用 |
+ | `CN_SUFFIX` | `_korean` | 字体块名后缀；沿用韩文槽，见下 |
+ 
+-**不要随意改字号**：14px 会让拉丁字粘连（`w == adv`，笔画相接），12px 是已验证可用的上限。
++默认保持 12px 小字。做 14px 对照时使用单独的输出目录。下面的例子将小字图集扩大到 1024×512，英文字母间距增加 1px，两套字库都沿用 `CN_FONT`。如果还想对照细字重，可设置 `CN_FONT14=C:/Windows/Fonts/msyhl.ttc`。
++
++```bash
++CN_OUT=../../build2/font14/pack CN_WORK=../../build2/font14/work \
++CN_PW14=1024 CN_PH14=512 \
++CN_SZ14=14 CN_B14=12 CN_LATIN_SPACING14=1 ./build.sh
++```
++
++`build.sh` 从脚本目录运行，以上示例的相对输出目录也以该目录为基准。也可以给 `CN_OUT` 和 `CN_WORK` 传绝对路径。
++
++若文字整体偏下，在相同的字库参数下加 `CN_SHIFT_Y14=-1` 或 `CN_SHIFT_Y21=-1` 试验对应字号。该设置只改 `CHINESE.BIN` 中有墨迹字形的垂直偏移。请继续使用同字号构建的 `LANGUAGETEXTURES.BIN`。
+ 
+ ## 这份包为什么用 `_korean` 的块名
+ 
+@@ -54,7 +67,7 @@ Chinese 且没有 `NFSU_FONTS_ROW` 时自动借用 Korean 行，所以不需要
+ | `build.py` | 字形排布 `render_page()`、FNTF 描述符 `font_desc()`、`.bin` 读取 |
+ | `lib_dxt5.py` | 灰度 DXT5 编码（颜色块承载灰度，mip 链到短边 8） |
+ | `lib_jdlz.py` | JDLZ 解压 + 真压缩 |
+-| `patch_tpk.py` | 把两张新页写回 TPK 的对应 ID（`0xDCA5485A` / `0x833A8678`） |
++| `patch_tpk.py` | 把两张新页写回 TPK 的对应 ID（`0xDCA5485A` / `0x833A8678`），同步尺寸、mip、DXT5 格式和解压偏移 |
+ | `build_cn.py` | 写语言 `.bin`：条目表 + 字符表 + 字符串池 + 字体段 |
+ | `bintext.py` | 该 `.bin` 的编码/解码（两级字符表） |
+ | `verify.py` | 把产物解码回 Unicode 与译文逐条比对（验收） |
+@@ -63,11 +76,11 @@ Chinese 且没有 `NFSU_FONTS_ROW` 时自动借用 Korean 行，所以不需要
+ 
+ ## 已知限制
+ 
+-- 字号 12px 上限（见上）。
++- 14px 的观感和行宽需要与 12px 基准包在游戏中对照。
+ - 译文覆盖：3846 项中 3098 已译，560 与英文相同（车名/品牌/`$TOKEN$`），188 英文本身为空。
+ - 前端语言选择界面还没有第 9 个按钮；靠默认选中与 `--language chinese-sc` 切换。
+ 
+ ## 溯源
+ 
+ 技术结论（文件格式、编码、图集通道语义、踩过的坑）在 `.scratch/chinese-pack/FINDINGS.md`，
+-交付清单在 `DONE.md`。本目录只放可复现的构建链。
+\ No newline at end of file
++交付清单在 `DONE.md`。本目录只放可复现的构建链。
+diff --git a/scripts/chinese/build.py b/scripts/chinese/build.py
+index 6656fec..bb11e53 100644
+--- a/scripts/chinese/build.py
++++ b/scripts/chinese/build.py
+@@ -100,7 +100,8 @@ def render_page(chars, size, page_w, page_h, baseline, font_path='C:/Windows/Fon
+         glyphs[ch]=dict(w=w,h=h,x=px,y=py,b=baseline+oy,adv=int(round(adv)))
+     return img,glyphs
+ 
+-def font_desc(name, ext, path, glyphs_by_code, page_w, page_h, font_size, fsym, maxbh, tpl_ext='bmp', tpl_path=None):
++def font_desc(name, ext, path, glyphs_by_code, page_w, page_h, font_size, fsym, maxbh,
++              tpl_ext='bmp', tpl_path=None, *, y_shift=0):
+     """glyphs_by_code: list of (code, dict) sorted by code"""
+     n=len(glyphs_by_code)
+     pageoff=0x80+16*n+0x30
+@@ -115,7 +116,14 @@ def font_desc(name, ext, path, glyphs_by_code, page_w, page_h, font_size, fsym,
+     for i,v in enumerate(u32): struct.pack_into('<I',hdr,0x18+4*i,v)
+     body=bytearray()
+     for code,g in glyphs_by_code:
+-        body+=struct.pack('<HBBHHHHHH',code,g['w'],g['h'],g['x'],g['y'],0,max(0,min(g['b'],0xFFFF)),0,max(0,min(g['adv'],0xFFFF)))
++        glyph_y = max(0, min(g['b'], 0xFFFF))
++        if y_shift and g['w'] and g['h']:
++            glyph_y += y_shift
++            if not -128 <= glyph_y <= 127:
++                raise ValueError(f'{name}: vertical offset for U+{code:04X} does not fit a signed byte')
++            # The renderer sign-extends byte +0x0A of each glyph record.
++            glyph_y &= 0xFF
++        body+=struct.pack('<HBBHHHHHH',code,g['w'],g['h'],g['x'],g['y'],0,glyph_y,0,max(0,min(g['adv'],0xFFFF)))
+     sent=b'Buy ERTS'+bytes(0x30-8)
+     ph=struct.pack('<IHHIIII',0x17B,0x40,(page_w*page_h)>>16,0x30,page_w*page_h,0,0)
+     fn=bytearray()
+diff --git a/scripts/chinese/build.sh b/scripts/chinese/build.sh
+index 0e8c2f3..dad257a 100644
+--- a/scripts/chinese/build.sh
++++ b/scripts/chinese/build.sh
+@@ -6,7 +6,7 @@
+ # Outputs: CHINESE.BIN + LANGUAGETEXTURES.BIN; run ./install.sh to copy them
+ # into <game>/Languages/Chinese_SC, where the host redirects LANGUAGES\*.BIN.
+ # Intermediates (glyph pages, fontblocks) go to <repo>/build2/chinese_work.
+-set -e
++set -eo pipefail
+ cd "$(dirname "$0")"
+ 
+ export CN_SUFFIX=${CN_SUFFIX:-_korean}   # block names reuse the Korean font slot
+@@ -19,6 +19,9 @@ export CN_MAXCHARS=${CN_MAXCHARS:-0}
+ PACK="$(python -c 'import paths;print(paths.OUT)')"
+ WORK="$(python -c 'import paths;print(paths.WORK)')"
+ mkdir -p "$PACK" "$WORK"
++STAGE="$(mktemp -d "$WORK/pack.XXXXXXXX")"
++trap 'rm -f -- "$STAGE/CHINESE.BIN" "$STAGE/LANGUAGETEXTURES.BIN"; rmdir -- "$STAGE"' EXIT
++export CN_OUT="$STAGE"
+ echo "game  $(python -c 'import paths;print(paths.game_root())')"
+ echo "font  $(python -c 'import paths;print(paths.font_file())')"
+ echo "pages ${CN_PW14}x${CN_PH14}@${CN_SZ14} / ${CN_PW21}x${CN_PH21}@${CN_SZ21}  maxchars ${CN_MAXCHARS}"
+@@ -27,6 +30,7 @@ python build_fonts.py | tail -4
+ TPK_MODE=keep python patch_tpk.py | grep -E 'dca5485a|833a8678'
+ python build_cn.py | tail -1
+ python verify.py | tail -3
++mv -- "$STAGE/CHINESE.BIN" "$STAGE/LANGUAGETEXTURES.BIN" "$PACK/"
+ 
+ echo "pack: $PACK"
+-ls -la "$PACK/CHINESE.BIN" "$PACK/LANGUAGETEXTURES.BIN"
+\ No newline at end of file
++ls -la "$PACK/CHINESE.BIN" "$PACK/LANGUAGETEXTURES.BIN"
+diff --git a/scripts/chinese/build_fonts.py b/scripts/chinese/build_fonts.py
+index b252b98..092c8cf 100644
+--- a/scripts/chinese/build_fonts.py
++++ b/scripts/chinese/build_fonts.py
+@@ -2,42 +2,34 @@
+ import struct, json, os, sys
+ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ import paths
+-import build as B
+-from build import render_page, font_desc, parse_bin
+-from lib_dxt5 import encode_chain
+-from lib_jdlz import decomp
++from build import render_page, font_desc
++from lib_dxt5 import encode, mips
+ import numpy as np
+-from PIL import Image
+ 
+ OUT = paths.WORK + os.sep
+-TPK = paths.lang_template()
+ 
+-def dds_header(w, h, fourcc=b'DXT5'):
++def write_page(face, image):
++    width, height = image.size
++    levels = mips(np.array(image, dtype=np.uint8))
++    payload = b''.join(encode(level) for level in levels)
+     hdr = bytearray(128)
+     hdr[0:4] = b'DDS '
+-    struct.pack_into('<I', hdr, 4, 124)
+-    struct.pack_into('<I', hdr, 8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000)  # caps|height|width|pixelformat|linearsize
+-    struct.pack_into('<I', hdr, 12, h)
+-    struct.pack_into('<I', hdr, 16, w)
+-    struct.pack_into('<I', hdr, 20, max(1, (w + 3) // 4) * max(1, (h + 3) // 4) * 16)
+-    struct.pack_into('<I', hdr, 28, 1)          # mipmap count
+-    struct.pack_into('<I', hdr, 76, 32)         # pixel format size
+-    struct.pack_into('<I', hdr, 80, 0x4)        # DDPF_FOURCC
+-    hdr[84:88] = fourcc
+-    struct.pack_into('<I', hdr, 108, 0x1000)    # DDSCAPS_TEXTURE
+-    return bytes(hdr)
+-
+-def orig_dds_header(eid):
+-    b = open(TPK, 'rb').read()
+-    N = struct.unpack_from('<I', b, 0xE8)[0] // 0x14
+-    for i in range(N):
+-        e = struct.unpack_from('<5I', b, 0xEC + i * 0x14)
+-        if e[0] == eid:
+-            u = decomp(b[e[1]:e[1] + e[2]])
+-            k = u.find(b'DDS ')
+-            if k >= 0:
+-                return u[k:k + 128]
+-    return None
++    flags = 0x81007  # caps, dimensions, pixel format and linear size
++    caps = 0x1000  # texture
++    if len(levels) > 1:
++        flags |= 0x20000  # mipmap count
++        caps |= 0x400008  # mipmap and complex surface
++    top_size = ((width + 3) // 4) * ((height + 3) // 4) * 16
++    struct.pack_into('<7I', hdr, 4, 124, flags, height, width, top_size, 0, len(levels))
++    struct.pack_into('<II4s', hdr, 76, 32, 4, b'DXT5')
++    struct.pack_into('<I', hdr, 108, caps)
++    stem = os.path.join(OUT, f'page{face}')
++    image.save(stem + '.png')
++    with open(stem + '.dxt5', 'wb') as raw:
++        raw.write(payload)
++    with open(stem + '.dds', 'wb') as dds:
++        dds.write(hdr + payload)
++    print(f'page{face}: {width}x{height}, {len(levels)} mip levels, {len(payload)} bytes')
+ 
+ def chars_from(json_path):
+     import collections
+@@ -64,31 +56,28 @@ def main():
+     pw14 = int(os.environ.get('CN_PW14', '1024')); ph14 = int(os.environ.get('CN_PH14', '512'))
+     pw21 = int(os.environ.get('CN_PW21', '1024')); ph21 = int(os.environ.get('CN_PH21', '1024'))
+     pad14 = int(os.environ.get('CN_PAD14', '1')); pad21 = int(os.environ.get('CN_PAD21', '1'))
+-    im14, g14 = render_page(ascii_chars + cjk, sz14, pw14, ph14, b14, font_path, pad=pad14)
++    small_font = os.environ.get('CN_FONT14') or font_path
++    latin_spacing = int(os.environ.get('CN_LATIN_SPACING14', '0'))
++    if latin_spacing < 0:
++        raise ValueError('CN_LATIN_SPACING14 must be nonnegative')
++    im14, g14 = render_page(ascii_chars + cjk, sz14, pw14, ph14, b14, small_font, pad=pad14)
+     im21, g21 = render_page(ascii_chars + cjk, sz21, pw21, ph21, b21, font_path, pad=pad21)
+-    im14.save(OUT + 'page14.png'); im21.save(OUT + 'page21.png')
+-    d14 = encode_chain(np.array(im14, dtype=np.uint8))
+-    d21 = encode_chain(np.array(im21, dtype=np.uint8))
+-    open(OUT + 'page14.dxt5', 'wb').write(d14)
+-    open(OUT + 'page21.dxt5', 'wb').write(d21)
+-    print('dxt5 sizes', len(d14), len(d21))
+-
+-    h14 = orig_dds_header(0xDCA5485A) or dds_header(1024, 1024)
+-    h21 = orig_dds_header(0x833A8678) or dds_header(1024, 1024)
+-    h14 = bytearray(h14); h21 = bytearray(h21)
+-    struct.pack_into('<I', h14, 12, 1024); struct.pack_into('<I', h14, 16, 1024)
+-    struct.pack_into('<I', h21, 12, 1024); struct.pack_into('<I', h21, 16, 1024)
+-    struct.pack_into('<I', h14, 20, len(d14)); struct.pack_into('<I', h21, 20, len(d21))
+-    open(OUT + 'page14.dds', 'wb').write(bytes(h14) + d14)
+-    open(OUT + 'page21.dds', 'wb').write(bytes(h21) + d21)
+-    print('dds', 128 + len(d14), 128 + len(d21))
++    for ch in ascii_chars:
++        if ch.isalpha():
++            g14[ch]['adv'] += latin_spacing
++    write_page(14, im14)
++    write_page(21, im21)
+ 
+     fs14 = int(os.environ.get('CN_FS14', str(sz14))); fs21 = int(os.environ.get('CN_FS21', str(sz21)))
++    shift_y14 = int(os.environ.get('CN_SHIFT_Y14', '0'))
++    shift_y21 = int(os.environ.get('CN_SHIFT_Y21', '0'))
+     gs14 = sorted((ord(c), g) for c, g in g14.items())
+     gs21 = sorted((ord(c), g) for c, g in g21.items())
+     sfx = os.environ.get('CN_SUFFIX', '_chinese')
+-    d1 = font_desc('conduitmditc_tt14i' + sfx, 'bin', 'c_tt14i' + sfx + '.bin', gs14, pw14, ph14, fs14, b14, 16, tpl_path='i' + sfx + '.bmp')
+-    d2 = font_desc('conduitmditc_tt21i' + sfx, 'bin', 'c_tt21i' + sfx + '.bin', gs21, pw21, ph21, fs21, b21, 21, tpl_path='i' + sfx + '.bmp')
++    d1 = font_desc('conduitmditc_tt14i' + sfx, 'bin', 'c_tt14i' + sfx + '.bin', gs14,
++                   pw14, ph14, fs14, b14, 16, tpl_path='i' + sfx + '.bmp', y_shift=shift_y14)
++    d2 = font_desc('conduitmditc_tt21i' + sfx, 'bin', 'c_tt21i' + sfx + '.bin', gs21,
++                   pw21, ph21, fs21, b21, 21, tpl_path='i' + sfx + '.bmp', y_shift=shift_y21)
+     open(OUT + 'fontblocks.bin', 'wb').write(d1 + d2)
+     print('blocks', len(d1), len(d2))
+ 
+diff --git a/scripts/chinese/patch_tpk.py b/scripts/chinese/patch_tpk.py
+index 489605f..224e9fa 100644
+--- a/scripts/chinese/patch_tpk.py
++++ b/scripts/chinese/patch_tpk.py
+@@ -1,62 +1,112 @@
++"""Replace the two font textures in the original Underground language TPK."""
+ 
+-import struct, os, sys
+-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import os
++from pathlib import Path
++import struct
++
++from lib_jdlz import compress
+ import paths
+-from lib_jdlz import decomp, compress
+ 
+-SRC=paths.lang_template()
+-OUT=paths.WORK + os.sep
+-LANGPACK=paths.OUT + os.sep
+-os.makedirs(LANGPACK,exist_ok=True)
++
++HASH_LIST = 0xA4
++DIRECTORY = 0xEC
++DESCRIPTORS = 0x194
++FORMATS = 0x57C
++PAYLOAD = 0x800
++DXT5 = 0x26
++FONT_FACES = {0xDCA5485A: 14, 0x833A8678: 21}
++
+ 
+ def ea_hash(name):
+-    h=0xFFFFFFFF
+-    for ch in name:
+-        c=ord(ch)
+-        if 0x61<=c<=0x7A: c-=0x20
+-        h=(h*0x21+c)&0xFFFFFFFF
+-    return h
+-
+-b=bytearray(open(SRC,'rb').read())
+-ENTS=0xEC; RECS=0x194; PAYLOAD=0x800
+-N=struct.unpack_from('<I',b,0xE8)[0]//0x14
+-entries=[]
+-for i in range(N):
+-    eid,off,sz,fl,pad=struct.unpack_from('<5I',b,ENTS+i*0x14)
+-    entries.append([eid,off,sz,fl])
+-d14=open(OUT+'page14.dxt5','rb').read()   # raw DXT5 + mip chain, NO DDS header
+-d21=open(OUT+'page21.dxt5','rb').read()
+-KEEP = os.environ.get('TPK_MODE') == 'keep'
+-NEW={0xDCA5485A:('conduitmditc_tt14i_korean' if KEEP else 'conduitmditc_tt14i_chinese'),
+-     0x833A8678:('conduitmditc_tt21i_korean' if KEEP else 'conduitmditc_tt21i_chinese')}
+-DATA={0xDCA5485A:d14, 0x833A8678:d21}
+-blobs=[]; names=[]
+-for i,(eid,off,sz,fl) in enumerate(entries):
+-    if eid in NEW:
+-        name=NEW[eid]; blob=compress(DATA[eid])
+-        print('%08x -> %s usize %d csize %d (was %d)'%(eid,name,len(DATA[eid]),len(blob),sz))
+-        entries[i][0]=ea_hash(name); names.append(name.encode()); blobs.append(blob)
+-    else:
+-        blobs.append(bytes(b[off:off+sz]))
+-        names.append(None)
+-body=bytearray(); offs=[]; cur=PAYLOAD
+-for blob in blobs:
+-    offs.append(cur); body+=blob; cur+=len(blob)
+-out=bytearray(b[:PAYLOAD])+bytes(body)
+-# sub blocks
+-struct.pack_into('<II',out,0x780,0x33320002,0x78+len(body))
+-struct.pack_into('<II',out,0x700,0xB3320000,len(out)-0x708)
+-for i in range(N):
+-    struct.pack_into('<5I',out,ENTS+i*0x14,entries[i][0],offs[i],len(blobs[i]),entries[i][3],0)
+-    if names[i] is not None:
+-        ro=RECS+i*0x7C
+-        out[ro+0x0D:ro+0x0D+32]=names[i].ljust(32,b'\x00')
+-        struct.pack_into('<I',out,ro+0x24,entries[i][0])
+-        struct.pack_into('<I',out,ro+0x38,len(DATA[eid]))   # usize must match the new payload
+-out+=struct.pack('<II',0,0x1000)+bytes(0x1000)
+-struct.pack_into('<I',out,0x04,len(out)-0x1010)
+-open(OUT+'LANGUAGETEXTURES.BIN','wb').write(bytes(out))
+-print('file',len(out),'hdr',hex(struct.unpack_from('<I',out,4)[0]))
+-for i in range(N):
+-    print(' %d id %08x off %06x size %06x'%(i,struct.unpack_from('<I',out,ENTS+i*0x14)[0],
+-        struct.unpack_from('<I',out,ENTS+i*0x14+4)[0],struct.unpack_from('<I',out,ENTS+i*0x14+8)[0]))
++    result = 0xFFFFFFFF
++    for value in name.upper().encode('ascii'):
++        result = (result * 33 + value) & 0xFFFFFFFF
++    return result
++
++
++def read_page(face, stock_dimensions):
++    stem = Path(paths.WORK) / f'page{face}'
++    pixels = stem.with_suffix('.dxt5').read_bytes()
++    width, height = stock_dimensions
++    dds = stem.with_suffix('.dds')
++    if dds.is_file():
++        data = dds.read_bytes()
++        if data[128:] == pixels:
++            if data[:4] != b'DDS ' or data[84:88] != b'DXT5':
++                raise ValueError(f'{dds} must be a DXT5 DDS')
++            height, width, top_size = struct.unpack_from('<3I', data, 12)
++            levels = struct.unpack_from('<I', data, 28)[0]
++            if top_size != width * height or levels != min(width, height).bit_length() - 3:
++                raise ValueError(f'{dds} has inconsistent mipmap metadata')
++    # The legacy swap-glyphs builder only writes raw DXT5 at the stock dimensions.
++    if any(d < 8 or d > 0x7FFF or d & (d - 1) for d in (width, height)):
++        raise ValueError(f'page{face}: invalid texture dimensions {width}x{height}')
++    levels = min(width, height).bit_length() - 3
++    expected_size = sum((width >> level) * (height >> level) for level in range(levels))
++    if len(pixels) != expected_size:
++        raise ValueError(f'page{face}: {len(pixels)} bytes for {width}x{height}, expected {expected_size}')
++    return pixels, width, height, levels
++
++
++def patch_tpk(template, keep_names):
++    count = struct.unpack_from('<I', template, DIRECTORY - 4)[0] // 0x14
++    if count != 8 or struct.unpack_from('<II', template, FORMATS - 8) != (0x33310005, count * 32):
++        raise ValueError('expected an Underground language TPK with eight textures')
++    entries = list(struct.unpack_from('<5I', template, DIRECTORY + i * 0x14) for i in range(count))
++    if not FONT_FACES.keys() <= {entry[0] for entry in entries}:
++        raise ValueError('original TPK is missing its Korean font textures')
++
++    out = bytearray(template[:PAYLOAD])
++    cache_offset = 0
++    output_ids = []
++    for index, (texture_id, offset, size, flags, pad) in enumerate(entries):
++        record = DESCRIPTORS + index * 0x7C
++        fmt = FORMATS + index * 32
++        blob = template[offset:offset + size]
++        if offset < PAYLOAD or len(blob) != size or blob[:4] != b'JDLZ':
++            raise ValueError(f'{texture_id:08x}: invalid texture payload')
++        raw_size = struct.unpack_from('<I', blob, 8)[0]
++        if texture_id in FONT_FACES:
++            face = FONT_FACES[texture_id]
++            stock_dimensions = struct.unpack_from('<HH', template, record + 0x44)
++            pixels, width, height, levels = read_page(face, stock_dimensions)
++            blob = compress(pixels)
++            raw_size = len(pixels)
++            if not keep_names:
++                name = f'conduitmditc_tt{face}i_chinese'
++                texture_id = ea_hash(name)
++                out[record + 0x0C:record + 0x24] = name.encode('ascii')[:24].ljust(24, b'\0')
++                struct.pack_into('<I', out, HASH_LIST + index * 8, texture_id)
++                struct.pack_into('<I', out, record + 0x24, texture_id)
++            struct.pack_into('<IHHBBB', out, record + 0x40, width * height, width, height,
++                             width.bit_length() - 1, height.bit_length() - 1, DXT5)
++            out[record + 0x4E] = levels
++            out[fmt + 0x14:fmt + 0x18] = b'DXT5'
++            print(f'{texture_id:08x}: {width}x{height}, {levels} mips, {raw_size} decoded bytes')
++
++        output_ids.append(texture_id)
++        struct.pack_into('<5I', out, DIRECTORY + index * 0x14, texture_id, len(out), len(blob), flags, pad)
++        cache_end = (cache_offset + raw_size + 0x7F) & ~0x7F
++        struct.pack_into('<3I', out, record + 0x30, cache_offset, cache_end, raw_size)
++        cache_offset = cache_end
++        out.extend(blob)
++
++    if output_ids != sorted(set(output_ids)):
++        raise ValueError('renamed texture IDs would break the sorted TPK index')
++    struct.pack_into('<I', out, 0x784, len(out) - 0x788)
++    struct.pack_into('<I', out, 0x704, len(out) - 0x708)
++    out.extend(template[-0x1008:])
++    struct.pack_into('<I', out, 4, len(out) - 0x1010)
++    return out
++
++
++def main():
++    template = Path(paths.lang_template()).read_bytes()
++    data = patch_tpk(template, keep_names=os.environ.get('TPK_MODE') == 'keep')
++    target = Path(paths.OUT) / 'LANGUAGETEXTURES.BIN'
++    target.parent.mkdir(parents=True, exist_ok=True)
++    target.write_bytes(data)
++
++
++if __name__ == '__main__':
++    main()
